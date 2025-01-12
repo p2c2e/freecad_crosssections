@@ -41,7 +41,7 @@ The Cross Section Planner is a FreeCAD macro that helps create evenly spaced cro
 This macro is provided as-is under the MIT License. See the source code for details.
 
 ## Author
-[Your Name Here]
+Sudharsan Rangarajan
 
 ## Version
 1.0 - Initial release
