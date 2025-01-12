@@ -1,0 +1,218 @@
+import FreeCAD as App
+import FreeCADGui as Gui
+import Part
+from PySide import QtGui
+
+class CrossSectionPlanner:
+    def __init__(self):
+        self.view_objects = []
+        self.selected_axis = 'Y'  # Default axis
+        self.num_sections = 5
+        self.offset = 0.0  # Default offset (in mm)
+        self.preview_planes = []
+        self.obj = None
+        
+    def get_selected_object(self):
+        selection = Gui.Selection.getSelection()
+        if not selection:
+            QtGui.QMessageBox.warning(None, "Selection Error",
+                                      "No object selected. Please select a 3D object.")
+            return None
+        return selection[0]
+
+    def show_dialog(self):
+        dialog = QtGui.QDialog()
+        dialog.setWindowTitle("Cross Section Planner")
+        layout = QtGui.QVBoxLayout()
+        
+        # Axis selection
+        axis_group = QtGui.QGroupBox("Section Normal Axis")
+        axis_layout = QtGui.QHBoxLayout()
+        for axis in ['X', 'Y', 'Z']:
+            btn = QtGui.QRadioButton(axis)
+            if axis == self.selected_axis:
+                btn.setChecked(True)
+            btn.toggled.connect(lambda checked, a=axis: self.on_axis_changed(a) if checked else None)
+            axis_layout.addWidget(btn)
+        axis_group.setLayout(axis_layout)
+        layout.addWidget(axis_group)
+
+        # Number of sections
+        num_layout = QtGui.QHBoxLayout()
+        num_layout.addWidget(QtGui.QLabel("Number of sections:"))
+        num_spinner = QtGui.QSpinBox()
+        num_spinner.setRange(2, 20)
+        num_spinner.setValue(self.num_sections)
+        num_spinner.valueChanged.connect(self.on_num_changed)
+        num_layout.addWidget(num_spinner)
+        layout.addLayout(num_layout)
+
+        # Offset control
+        offset_layout = QtGui.QHBoxLayout()
+        offset_layout.addWidget(QtGui.QLabel("Offset from edges (mm):"))
+        offset_spinner = QtGui.QDoubleSpinBox()
+        offset_spinner.setRange(0.0, 100.0)
+        offset_spinner.setSingleStep(0.1)
+        offset_spinner.setDecimals(3)
+        offset_spinner.setValue(self.offset)
+        offset_spinner.valueChanged.connect(self.on_offset_changed)
+        offset_layout.addWidget(offset_spinner)
+        layout.addLayout(offset_layout)
+
+        # Preview button
+        preview_btn = QtGui.QPushButton("Preview Sections")
+        preview_btn.clicked.connect(self.show_preview)
+        layout.addWidget(preview_btn)
+
+        # Create sections button
+        create_btn = QtGui.QPushButton("Create Sections")
+        create_btn.clicked.connect(lambda: self.create_sections(dialog))
+        layout.addWidget(create_btn)
+        
+        dialog.setLayout(layout)
+        return dialog
+
+    def on_axis_changed(self, axis):
+        self.selected_axis = axis
+        self.clear_preview()
+
+    def on_num_changed(self, value):
+        self.num_sections = value
+        self.clear_preview()
+
+    def on_offset_changed(self, value):
+        self.offset = value
+        self.clear_preview()
+
+    def clear_preview(self):
+        for obj in self.preview_planes:
+            if App.ActiveDocument.getObject(obj.Name):
+                App.ActiveDocument.removeObject(obj.Name)
+        self.preview_planes.clear()
+        App.ActiveDocument.recompute()
+
+    def get_section_plane(self, pos, bbox, axis):
+        margin = 5  # mm margin around the object
+        if axis == 'X':
+            return Part.makePolygon([
+                App.Vector(pos, bbox.YMin - margin, bbox.ZMin - margin),
+                App.Vector(pos, bbox.YMax + margin, bbox.ZMin - margin),
+                App.Vector(pos, bbox.YMax + margin, bbox.ZMax + margin),
+                App.Vector(pos, bbox.YMin - margin, bbox.ZMax + margin),
+                App.Vector(pos, bbox.YMin - margin, bbox.ZMin - margin)
+            ])
+        elif axis == 'Y':
+            return Part.makePolygon([
+                App.Vector(bbox.XMin - margin, pos, bbox.ZMin - margin),
+                App.Vector(bbox.XMax + margin, pos, bbox.ZMin - margin),
+                App.Vector(bbox.XMax + margin, pos, bbox.ZMax + margin),
+                App.Vector(bbox.XMin - margin, pos, bbox.ZMax + margin),
+                App.Vector(bbox.XMin - margin, pos, bbox.ZMin - margin)
+            ])
+        else:  # Z axis
+            return Part.makePolygon([
+                App.Vector(bbox.XMin - margin, bbox.YMin - margin, pos),
+                App.Vector(bbox.XMax + margin, bbox.YMin - margin, pos),
+                App.Vector(bbox.XMax + margin, bbox.YMax + margin, pos),
+                App.Vector(bbox.XMin - margin, bbox.YMax + margin, pos),
+                App.Vector(bbox.XMin - margin, bbox.YMin - margin, pos)
+            ])
+
+    def create_section(self, shape, plane_wire):
+        try:
+            face = Part.Face(plane_wire)
+            section = shape.section(face)
+            if not section.Edges:
+                return None
+            sorted_edges = Part.sortEdges(section.Edges)
+            wire = Part.Wire(sorted_edges[0])
+            if wire.isClosed():
+                return Part.Face(wire)
+            return None
+        except Part.OCCError:
+            return None
+
+    def show_preview(self):
+        self.obj = self.get_selected_object()
+        if not self.obj:
+            return
+        self.clear_preview()
+        bbox = self.obj.Shape.BoundBox
+        
+        min_val, max_val = self._get_axis_bounds(bbox)
+        if min_val >= max_val:
+            QtGui.QMessageBox.warning(None, "Error",
+                                      "Offset is too large for object dimensions.")
+            return
+            
+        step = (max_val - min_val) / (self.num_sections - 1)
+        for i in range(self.num_sections):
+            pos = min_val + (step * i)
+            plane_wire = self.get_section_plane(pos, bbox, self.selected_axis)
+            section_face = self.create_section(self.obj.Shape, plane_wire)
+            if section_face:
+                preview = App.ActiveDocument.addObject("Part::Feature", f"PreviewSection_{i}")
+                preview.Shape = section_face
+                preview.ViewObject.ShapeColor = (0.0, 0.8, 0.0)  # Green color
+                self._position_preview(preview, pos)
+                self.preview_planes.append(preview)
+
+        App.ActiveDocument.recompute()
+
+    def create_sections(self, dialog):
+        if not self.obj:
+            QtGui.QMessageBox.warning(None, "Error", "Please preview sections first.")
+            return
+        
+        doc = App.newDocument("CrossSections")
+        bbox = self.obj.Shape.BoundBox
+        min_val, max_val = self._get_axis_bounds(bbox)
+        if min_val >= max_val:
+            QtGui.QMessageBox.warning(None, "Error",
+                                      "Offset is too large for object dimensions.")
+            return
+
+        step = (max_val - min_val) / (self.num_sections - 1)
+        for i in range(self.num_sections):
+            pos = min_val + (step * i)
+            plane_wire = self.get_section_plane(pos, bbox, self.selected_axis)
+            section_face = self.create_section(self.obj.Shape, plane_wire)
+            if section_face:
+                section = doc.addObject("Part::Feature", f"Section_{i+1}")
+                section.Shape = section_face
+                self._position_preview(section, pos)
+
+        doc.recompute()
+        
+        # Automatically clear the preview after final sections are created
+        self.clear_preview()
+
+        dialog.accept()
+
+    def _get_axis_bounds(self, bbox):
+        if self.selected_axis == 'X':
+            min_val = bbox.XMin + self.offset
+            max_val = bbox.XMax - self.offset
+        elif self.selected_axis == 'Y':
+            min_val = bbox.YMin + self.offset
+            max_val = bbox.YMax - self.offset
+        else:  # Z axis
+            min_val = bbox.ZMin + self.offset
+            max_val = bbox.ZMax - self.offset
+        return min_val, max_val
+
+    def _position_preview(self, preview, pos):
+        # The sections are already positioned correctly by the section operation
+        pass
+
+def main():
+    if not App.ActiveDocument:
+        QtGui.QMessageBox.warning(None, "Error",
+                                  "No active document found. Please open a document with a 3D model.")
+        return
+    planner = CrossSectionPlanner()
+    dialog = planner.show_dialog()
+    dialog.exec_()
+
+if __name__ == '__main__':
+    main()
